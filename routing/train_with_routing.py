@@ -35,11 +35,12 @@ from llamafactory.hparams import (
     FinetuningArguments,
     GeneratingArguments,
     ModelArguments,
+    TrainingArguments,
 )
 from llamafactory.train.sft.trainer import CustomSeq2SeqTrainer
 from llamafactory.train.sft.workflow import run_sft
 from llamafactory.model import load_model, load_tokenizer
-from transformers import Seq2SeqTrainingArguments, AutoConfig
+from transformers import AutoConfig
 
 from routing.config_patch import patch_qwen3_config_for_routing
 from routing.aux_head import enable_aux_head
@@ -67,7 +68,7 @@ def main():
     parser = HfArgumentParser((
         ModelArguments,
         DataArguments,
-        Seq2SeqTrainingArguments,
+        TrainingArguments,
         FinetuningArguments,
         GeneratingArguments,
         RoutingArguments,
