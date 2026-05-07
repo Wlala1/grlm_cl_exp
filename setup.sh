@@ -64,19 +64,18 @@ mkdir -p $DATA_DIR/cl_sft
 # cp $SRC/in_domain/books/sum_data/item_id2tid/books_tid2item_id.json $DATA_DIR/
 # cp $SRC/LlamaFactory/data/grlm_in_domain/amazon_books_cl_*.json $DATA_DIR/cl_sft/
 
-# Option B: Download from HuggingFace dataset (set your HF dataset path)
-# huggingface-cli download <your-hf-username>/grlm-books-cl-data --local-dir $DATA_DIR --repo-type dataset
+# Option B: Download from HuggingFace dataset
+if [ ! -f "$DATA_DIR/books_id2meta.json" ]; then
+    echo "  Downloading from HuggingFace..."
+    huggingface-cli download JazyJiang/grlm-books-cl-data --local-dir $DATA_DIR --repo-type dataset
+fi
 
 # Check if data exists
 if [ ! -f "$DATA_DIR/books_id2meta.json" ]; then
     echo ""
     echo "ERROR: Data not found at $DATA_DIR/"
-    echo "Please either:"
-    echo "  (A) Copy data from shared storage:"
-    echo "      cp /path/to/books_id2meta.json $DATA_DIR/"
-    echo "      cp /path/to/books_tid2item_id.json $DATA_DIR/"
-    echo "      cp /path/to/amazon_books_cl_*.json $DATA_DIR/cl_sft/"
-    echo "  (B) Upload data to HuggingFace and uncomment Option B above."
+    echo "Please ensure you have access to the HuggingFace dataset:"
+    echo "  huggingface-cli download JazyJiang/grlm-books-cl-data --local-dir $DATA_DIR --repo-type dataset"
     echo ""
     exit 1
 fi
