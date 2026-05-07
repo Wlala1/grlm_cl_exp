@@ -41,15 +41,18 @@ bash dispatch_all.sh
 
 ```
 grlm_cl_exp/
-├── setup.sh                    # Download models + data
+├── setup.sh                    # Download models + data + clone LlamaFactory
+├── run_books_cl_v2.sh          # Single chain: train 4 periods + sequential eval
 ├── dispatch_all.sh             # Launch all 21 chains on GPUs 1-7
-├── LlamaFactory/
-│   ├── run_books_cl_v2.sh      # Single chain: train 4 periods + sequential eval
-│   └── data/
-│       └── dataset_info.json   # Dataset registry (auto-populated by setup.sh)
+├── dispatch_sequential.sh      # Alternative: sequential dispatch per GPU
+├── scripts/
+│   └── generate_dataset_info.py # Generates LlamaFactory dataset registry
 ├── eval/
 │   ├── s5_books_cl_eval_seq.py # Sequential eval script (Tiger-style)
 │   └── recompute_cl_recall.py  # Post-hoc recompute from existing results
+├── LlamaFactory/               # Cloned by setup.sh (not in git)
+│   └── data/
+│       └── dataset_info.json   # Auto-populated by setup.sh
 ├── data/                       # Downloaded by setup.sh (not in git)
 │   ├── books_id2meta.json
 │   ├── books_tid2item_id.json
