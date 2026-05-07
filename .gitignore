@@ -1,0 +1,22 @@
+# Large files (downloaded by setup.sh)
+models/
+data/
+checkpoints/
+
+# Training outputs
+results/
+
+# LlamaFactory clone (downloaded by setup.sh)
+LlamaFactory/
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# OS
+.DS_Store
