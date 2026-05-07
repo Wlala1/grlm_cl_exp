@@ -84,6 +84,12 @@ Re-running the same command skips completed period evals and resumes from the fi
 bash dispatch_all.sh
 ```
 
+Existing results are protected. A period is considered complete only when both files exist:
+- `seq_recall_{tag}_D{t}.json` is valid JSON
+- `seq_results_{tag}_D{t}.jsonl` is non-empty
+
+If a period's result files are complete, eval is not re-run or overwritten. If its checkpoint is missing but a later period still needs it, the script may retrain that period only to restore the checkpoint chain, while preserving the existing eval/result files.
+
 ### Option B: Sequential per GPU (simpler, fewer GPUs OK)
 
 ```bash

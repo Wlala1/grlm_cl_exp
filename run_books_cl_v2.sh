@@ -59,6 +59,28 @@ json_valid() {
     [ -s "$path" ] && python3 -m json.tool "$path" >/dev/null 2>&1
 }
 
+eval_complete() {
+    local recall_file=$1
+    local results_file=$2
+    json_valid "$recall_file" && [ -s "$results_file" ]
+}
+
+future_period_incomplete() {
+    local period=$1
+    local future
+    for future in 1 2 3; do
+        if [ "$future" -le "$period" ]; then
+            continue
+        fi
+        if ! eval_complete \
+            "${RESULT_DIR}/seq_recall_${HIST_TAG}_D${future}.json" \
+            "${RESULT_DIR}/seq_results_${HIST_TAG}_D${future}.jsonl"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 checkpoint_ready() {
     local path=$1
     [ -d "$path" ] \
@@ -303,6 +325,16 @@ run_eval() {
         fail "Eval D${period} finished but recall JSON is missing or invalid: $recall_file"
     fi
 
+    if [ ! -s "$results_file" ]; then
+        mark_stage "$period" eval failed \
+            --exit-code 1 \
+            --checkpoint-path "$output_dir" \
+            --log-path "$eval_log" \
+            --result-recall-path "$recall_file" \
+            --result-results-path "$results_file"
+        fail "Eval D${period} finished but per-pair results are missing: $results_file"
+    fi
+
     mark_stage "$period" eval completed \
         --exit-code 0 \
         --checkpoint-path "$output_dir" \
@@ -338,18 +370,23 @@ for PERIOD in 0 1 2 3; do
     EVAL_LOG="${CHAIN_LOG_DIR}/eval_D${PERIOD}.log"
     RECALL_FILE="${RESULT_DIR}/seq_recall_${HIST_TAG}_D${PERIOD}.json"
     RESULTS_FILE="${RESULT_DIR}/seq_results_${HIST_TAG}_D${PERIOD}.jsonl"
+    PERIOD_RESULT_COMPLETE=0
 
-    if json_valid "$RECALL_FILE"; then
-        log "D${PERIOD} eval already complete: $RECALL_FILE"
-        mark_stage "$PERIOD" eval completed \
-            --exit-code 0 \
-            --checkpoint-path "$OUTPUT_DIR" \
-            --log-path "$EVAL_LOG" \
-            --result-recall-path "$RECALL_FILE" \
-            --result-results-path "$RESULTS_FILE"
-        collect_results "$PERIOD"
-        PREV_CKPT="$OUTPUT_DIR"
-        continue
+    if eval_complete "$RECALL_FILE" "$RESULTS_FILE"; then
+        PERIOD_RESULT_COMPLETE=1
+        if ! future_period_incomplete "$PERIOD" || checkpoint_ready "$OUTPUT_DIR"; then
+            log "D${PERIOD} eval already complete: $RECALL_FILE"
+            mark_stage "$PERIOD" eval completed \
+                --exit-code 0 \
+                --checkpoint-path "$OUTPUT_DIR" \
+                --log-path "$EVAL_LOG" \
+                --result-recall-path "$RECALL_FILE" \
+                --result-results-path "$RESULTS_FILE"
+            collect_results "$PERIOD"
+            PREV_CKPT="$OUTPUT_DIR"
+            continue
+        fi
+        log "D${PERIOD} eval exists, but checkpoint is missing and a future period is incomplete; retraining D${PERIOD}"
     fi
 
     TRAIN_STATUS=$(stage_status "$PERIOD" train)
@@ -375,6 +412,20 @@ for PERIOD in 0 1 2 3; do
         fi
         mkdir -p "$OUTPUT_DIR"
         run_train "$PERIOD" "$INIT_MODEL" "$LR" "$EPOCHS" "$OUTPUT_DIR" "$TRAIN_LOG"
+    fi
+
+    if [ "$PERIOD_RESULT_COMPLETE" -eq 1 ]; then
+        log "D${PERIOD} eval/result files already exist; keeping them and skipping eval"
+        mark_stage "$PERIOD" eval completed \
+            --exit-code 0 \
+            --checkpoint-path "$OUTPUT_DIR" \
+            --log-path "$EVAL_LOG" \
+            --result-recall-path "$RECALL_FILE" \
+            --result-results-path "$RESULTS_FILE"
+        collect_results "$PERIOD"
+        PREV_CKPT="$OUTPUT_DIR"
+        log "=== D${PERIOD} checkpoint restored; existing eval preserved ==="
+        continue
     fi
 
     run_eval "$PERIOD" "$OUTPUT_DIR" "$EVAL_LOG" "$RECALL_FILE" "$RESULTS_FILE"

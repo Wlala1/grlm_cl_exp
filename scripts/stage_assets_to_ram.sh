@@ -52,8 +52,8 @@ copy_tree_once() {
 mkdir -p "$RAM_ASSET_ROOT"
 df -h "$RAM_ASSET_ROOT" || true
 
-copy_tree_once "$SOURCE_MODEL_DIR" "$RAM_MODEL_DIR" "models"
-copy_tree_once "$SOURCE_DATA_DIR" "$RAM_DATA_DIR" "data"
+copy_tree_once "$SOURCE_MODEL_DIR" "$RAM_MODEL_DIR" "models" || return 1 2>/dev/null || exit 1
+copy_tree_once "$SOURCE_DATA_DIR" "$RAM_DATA_DIR" "data" || return 1 2>/dev/null || exit 1
 
 export MODEL_DIR="$RAM_MODEL_DIR"
 export DATA_DIR="$RAM_DATA_DIR"

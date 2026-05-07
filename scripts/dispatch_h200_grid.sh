@@ -1,6 +1,6 @@
 #!/bin/bash
 # Dispatch the full 3x7 Books CL grid on an 8-GPU H200 node.
-set -uo pipefail
+set -Eeuo pipefail
 
 WORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_ROOT=${RUN_ROOT:-/runs}
@@ -24,6 +24,28 @@ run_chain() {
     local cap=$2
     local gpu_ids=$3
     local chain_log="${LOG_ROOT}/${model}_${cap}.log"
+    local result_dir="${RUN_ROOT}/results/cl_results_seq/${model}_${cap}"
+    local hist_tag="$cap"
+    local period
+    if [ "$cap" = "full" ]; then
+        hist_tag="hfull"
+    fi
+
+    local complete=1
+    for period in 0 1 2 3; do
+        local recall_file="${result_dir}/seq_recall_${hist_tag}_D${period}.json"
+        local results_file="${result_dir}/seq_results_${hist_tag}_D${period}.jsonl"
+        if ! python3 -m json.tool "$recall_file" >/dev/null 2>&1 || [ ! -s "$results_file" ]; then
+            complete=0
+            break
+        fi
+    done
+
+    if [ "$complete" -eq 1 ]; then
+        log "SKIP  ${model} ${cap} GPUs=${gpu_ids} existing results complete"
+        python3 "${WORK_DIR}/scripts/collect_cross_scale_table.py" --results-root "${RUN_ROOT}/results" >> "$chain_log" 2>&1 || return 1
+        return 0
+    fi
 
     log "START ${model} ${cap} GPUs=${gpu_ids} log=${chain_log}"
     RUN_ROOT="$RUN_ROOT" bash "$RUNNER" "$model" "$cap" "$gpu_ids" >/dev/null 2>&1
@@ -96,15 +118,16 @@ wait_stage() {
 log "=== Dispatching full Books CL grid ==="
 log "Run root: $RUN_ROOT"
 log "Dispatch log: $DISPATCH_LOG"
-if [ "${USE_RAM_ASSETS:-0}" = "1" ]; then
-    # Exports MODEL_DIR and DATA_DIR for all chain workers below.
-    source "${WORK_DIR}/scripts/stage_assets_to_ram.sh"
-fi
 print_plan
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
     log "DRY_RUN=1; exiting without launching jobs"
     exit 0
+fi
+
+if [ "${USE_RAM_ASSETS:-0}" = "1" ]; then
+    # Exports MODEL_DIR and DATA_DIR for all chain workers below.
+    source "${WORK_DIR}/scripts/stage_assets_to_ram.sh" || exit 1
 fi
 
 TOTAL_FAILED=0

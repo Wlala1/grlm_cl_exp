@@ -149,7 +149,13 @@ def write_csv(path, rows):
 def write_json(path, rows, cl_results_dir):
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "metric": "Recall@20 percent",
+        "metric": "Recall@20",
+        "unit": "fraction",
+        "display_outputs": {
+            "csv": "percent",
+            "markdown": "percent",
+            "json": "fraction",
+        },
         "source_results_dir": cl_results_dir,
         "models": MODEL_ORDER,
         "caps": CAP_ORDER,

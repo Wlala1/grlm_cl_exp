@@ -364,12 +364,19 @@ def main():
         }
 
         hist_lens = [r["history_len"] for r in group_data]
+        if hist_lens:
+            history_len_range = [int(max(hist_lens)), int(min(hist_lens))]
+            history_len_label = f"{max(hist_lens)}-{min(hist_lens)}"
+        else:
+            history_len_range = [None, None]
+            history_len_label = "NA"
+
         group_results[f"group{g}"] = {
             "n_pairs": g_total,
-            "history_len_range": [int(max(hist_lens)), int(min(hist_lens))],
+            "history_len_range": history_len_range,
             "metrics": g_recall,
         }
-        print(f"  Group {g} ({g_total} pairs, hlen {max(hist_lens)}-{min(hist_lens)}): "
+        print(f"  Group {g} ({g_total} pairs, hlen {history_len_label}): "
               f"R@1={g_recall['recall@1']:.4f} R@5={g_recall['recall@5']:.4f} "
               f"R@10={g_recall['recall@10']:.4f} R@20={g_recall['recall@20']:.4f}")
 
