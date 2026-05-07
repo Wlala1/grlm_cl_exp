@@ -1,33 +1,95 @@
 #!/bin/bash
-# Books CL (Continual Learning) experiment v2
-# Tiger-style sequential eval (per-target with sliding window)
+# Books CL chain runner with period-level resume and per-eval collection.
 # Usage: bash run_books_cl_v2.sh <model_size> <cap> <gpu_ids>
-#   model_size: 06b, 17b, or 4b
-#   cap: h2, h5, h10, h20, h30, h40, or full
-#   gpu_ids: e.g., 1 (single) or 4,5 (multi for 4B)
+set -Eeuo pipefail
+
+if [ "$#" -ne 3 ]; then
+    echo "Usage: bash run_books_cl_v2.sh <model_size> <cap> <gpu_ids>"
+    echo "  model_size: 06b, 17b, or 4b"
+    echo "  cap: h2, h5, h10, h20, h30, h40, or full"
+    echo "  gpu_ids: e.g. 0 or 0,1"
+    exit 2
+fi
 
 MODEL_SIZE=$1
 CAP=$2
 GPU_IDS=$3
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
-LLAMA_DIR=${WORK_DIR}/LlamaFactory
-EVAL_SCRIPT=${WORK_DIR}/eval/s5_books_cl_eval_seq.py
-TID2ITEM=${WORK_DIR}/data/books_tid2item_id.json
-ID2META=${WORK_DIR}/data/books_id2meta.json
-EVAL_DIR=${WORK_DIR}/data/cl_sft
-RESULT_DIR=${WORK_DIR}/results/cl_results_seq/${MODEL_SIZE}_${CAP}
-MODEL_DIR=${WORK_DIR}/models
+RUN_ROOT=${RUN_ROOT:-/runs}
+LLAMA_DIR=${LLAMA_DIR:-${WORK_DIR}/LlamaFactory}
+DATA_DIR=${DATA_DIR:-${WORK_DIR}/data}
+MODEL_DIR=${MODEL_DIR:-${WORK_DIR}/models}
+RESULTS_ROOT=${RESULTS_ROOT:-${RUN_ROOT}/results}
+RESULT_DIR=${RESULT_DIR:-${RESULTS_ROOT}/cl_results_seq/${MODEL_SIZE}_${CAP}}
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-${RUN_ROOT}/checkpoints/${MODEL_SIZE}_${CAP}}
+LOG_ROOT=${LOG_ROOT:-${RUN_ROOT}/logs}
+CHAIN_LOG_DIR=${CHAIN_LOG_DIR:-${LOG_ROOT}/${MODEL_SIZE}_${CAP}}
+CHAIN_LOG=${CHAIN_LOG:-${LOG_ROOT}/${MODEL_SIZE}_${CAP}.log}
+STATE_DIR=${STATE_DIR:-${RUN_ROOT}/state}
+STATE_FILE=${STATE_FILE:-${STATE_DIR}/${MODEL_SIZE}_${CAP}.json}
 
-mkdir -p $RESULT_DIR
+EVAL_SCRIPT=${EVAL_SCRIPT:-${WORK_DIR}/eval/s5_books_cl_eval_seq.py}
+COLLECT_SCRIPT=${COLLECT_SCRIPT:-${WORK_DIR}/scripts/collect_cross_scale_table.py}
+STATE_SCRIPT=${STATE_SCRIPT:-${WORK_DIR}/scripts/chain_state.py}
+TID2ITEM=${TID2ITEM:-${DATA_DIR}/books_tid2item_id.json}
+ID2META=${ID2META:-${DATA_DIR}/books_id2meta.json}
+EVAL_DIR=${EVAL_DIR:-${DATA_DIR}/cl_sft}
+MAX_USERS=${MAX_USERS:-5000}
 
-# Model configs
+mkdir -p "$RESULT_DIR" "$CHECKPOINT_ROOT" "$CHAIN_LOG_DIR" "$STATE_DIR" "$LOG_ROOT"
+
+if [ "${CHAIN_LOG_REDIRECTED:-0}" != "1" ]; then
+    export CHAIN_LOG_REDIRECTED=1
+    exec > >(tee -a "$CHAIN_LOG") 2>&1
+fi
+
+log() {
+    echo "[$(date -Is)] $*"
+}
+
+fail() {
+    log "ERROR: $*"
+    python3 "$STATE_SCRIPT" finish --state-file "$STATE_FILE" --status failed 2>/dev/null || true
+    exit 1
+}
+
+json_valid() {
+    local path=$1
+    [ -s "$path" ] && python3 -m json.tool "$path" >/dev/null 2>&1
+}
+
+checkpoint_ready() {
+    local path=$1
+    [ -d "$path" ] \
+        && [ -f "$path/config.json" ] \
+        && { compgen -G "${path}/*.safetensors" >/dev/null || compgen -G "${path}/pytorch_model*.bin" >/dev/null; }
+}
+
+stage_status() {
+    local period=$1
+    local stage=$2
+    python3 "$STATE_SCRIPT" status --state-file "$STATE_FILE" --period "D${period}" --stage "$stage"
+}
+
+mark_stage() {
+    local period=$1
+    local stage=$2
+    local status=$3
+    shift 3
+    python3 "$STATE_SCRIPT" mark \
+        --state-file "$STATE_FILE" \
+        --period "D${period}" \
+        --stage "$stage" \
+        --status "$status" \
+        "$@"
+}
+
 if [ "$MODEL_SIZE" == "06b" ]; then
     MODEL_PATH=${MODEL_DIR}/Qwen3-0.6B
     LR_INIT=7e-5
     LR_FT=3e-5
     NUM_GPUS=1
-    USE_DS=""
     BS=4
     GA=16
 elif [ "$MODEL_SIZE" == "17b" ]; then
@@ -35,7 +97,6 @@ elif [ "$MODEL_SIZE" == "17b" ]; then
     LR_INIT=5e-5
     LR_FT=2e-5
     NUM_GPUS=1
-    USE_DS=""
     BS=4
     GA=16
 elif [ "$MODEL_SIZE" == "4b" ]; then
@@ -43,142 +104,296 @@ elif [ "$MODEL_SIZE" == "4b" ]; then
     LR_INIT=1e-4
     LR_FT=5e-5
     NUM_GPUS=2
-    USE_DS="--deepspeed examples/deepspeed/ds_z2_config.json"
     BS=4
     GA=8
 else
-    echo "Unknown model size: $MODEL_SIZE (use 06b, 17b, or 4b)"
-    exit 1
+    fail "Unknown model size: $MODEL_SIZE (use 06b, 17b, or 4b)"
 fi
 
-PORT=$((29500 + RANDOM % 100))
+case "$CAP" in
+    h2|h5|h10|h20|h30|h40|full) ;;
+    *) fail "Unknown cap: $CAP (use h2, h5, h10, h20, h30, h40, or full)" ;;
+esac
 
-# Dataset name based on cap
 if [ "$CAP" == "full" ]; then
     DATASET_SUFFIX=""
+    HIST_TAG="hfull"
+    CAP_NUM=""
 else
     DATASET_SUFFIX="_${CAP}"
+    HIST_TAG="$CAP"
+    CAP_NUM=${CAP#h}
 fi
+
+python3 "$STATE_SCRIPT" init \
+    --state-file "$STATE_FILE" \
+    --model-size "$MODEL_SIZE" \
+    --cap "$CAP" \
+    --gpu-ids "$GPU_IDS" \
+    --run-root "$RUN_ROOT" \
+    --result-dir "$RESULT_DIR" \
+    --checkpoint-root "$CHECKPOINT_ROOT" \
+    --log-dir "$CHAIN_LOG_DIR" \
+    --chain-log-path "$CHAIN_LOG"
+
+log "=== ${MODEL_SIZE} cap=${CAP} GPUs=${GPU_IDS} ==="
+log "Run root: $RUN_ROOT"
+log "Results: $RESULT_DIR"
+log "State: $STATE_FILE"
+log "Chain log: $CHAIN_LOG"
+log "Model dir: $MODEL_DIR"
+log "Data dir: $DATA_DIR"
+
+if [ -d "$LLAMA_DIR/data" ] && [ -d "$DATA_DIR/cl_sft" ]; then
+    ln -sfn "$DATA_DIR/cl_sft" "$LLAMA_DIR/data/grlm_in_domain"
+fi
+
+if [ "${SMOKE:-0}" = "1" ]; then
+    MAX_USERS=${SMOKE_MAX_USERS:-20}
+    SMOKE_TRAIN_ARGS=(--max_steps "${SMOKE_MAX_STEPS:-2}")
+    log "SMOKE=1: max_steps=${SMOKE_MAX_STEPS:-2}, max_users=$MAX_USERS"
+else
+    SMOKE_TRAIN_ARGS=()
+fi
+
+eval_batch_size() {
+    if [ "$CAP" == "full" ]; then
+        if [ "$MODEL_SIZE" == "06b" ]; then echo 16
+        elif [ "$MODEL_SIZE" == "17b" ]; then echo 8
+        else echo 4; fi
+    elif [ "$CAP_NUM" -le 10 ]; then
+        if [ "$MODEL_SIZE" == "06b" ]; then echo 32
+        elif [ "$MODEL_SIZE" == "17b" ]; then echo 16
+        else echo 8; fi
+    else
+        if [ "$MODEL_SIZE" == "06b" ]; then echo 20
+        elif [ "$MODEL_SIZE" == "17b" ]; then echo 10
+        else echo 6; fi
+    fi
+}
+
+run_train() {
+    local period=$1
+    local init_model=$2
+    local lr=$3
+    local epochs=$4
+    local output_dir=$5
+    local train_log=$6
+    local dataset_name="grlm_indomain_books_cl_D${period}${DATASET_SUFFIX}"
+    local port=$((29500 + RANDOM % 1000))
+
+    local common_args=(
+        --stage sft
+        --model_name_or_path "$init_model"
+        --do_train
+        --dataset "$dataset_name"
+        --template qwen3
+        --finetuning_type full
+        --output_dir "$output_dir"
+        --overwrite_cache
+        --overwrite_output_dir
+        --save_strategy no
+        --per_device_train_batch_size "$BS"
+        --gradient_accumulation_steps "$GA"
+        --lr_scheduler_type cosine
+        --logging_steps 10
+        --learning_rate "$lr"
+        --num_train_epochs "$epochs"
+        --plot_loss
+        --bf16
+        --report_to none
+    )
+    common_args+=("${SMOKE_TRAIN_ARGS[@]}")
+
+    log "Training D${period} from $init_model"
+    log "Train log: $train_log"
+    mark_stage "$period" train running --checkpoint-path "$output_dir" --log-path "$train_log"
+
+    cd "$LLAMA_DIR"
+    {
+        echo "[$(date -Is)] train D${period} ${MODEL_SIZE} ${CAP}"
+        echo "dataset=$dataset_name"
+        echo "init_model=$init_model"
+        echo "output_dir=$output_dir"
+    } >> "$train_log"
+
+    local exit_code=0
+    if [ "$NUM_GPUS" -eq 1 ]; then
+        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+            python3 src/train.py "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+    else
+        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
+            deepspeed --include "localhost:${GPU_IDS}" --master_port "$port" \
+            src/train.py --deepspeed examples/deepspeed/ds_z2_config.json \
+            "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+    fi
+
+    if [ "$exit_code" -ne 0 ]; then
+        mark_stage "$period" train failed --exit-code "$exit_code" --checkpoint-path "$output_dir" --log-path "$train_log"
+        fail "Training D${period} failed with exit code $exit_code. See $train_log"
+    fi
+
+    mark_stage "$period" train completed --exit-code 0 --checkpoint-path "$output_dir" --log-path "$train_log"
+    log "Training D${period} complete"
+}
+
+run_eval() {
+    local period=$1
+    local output_dir=$2
+    local eval_log=$3
+    local recall_file=$4
+    local results_file=$5
+    local eval_file="${EVAL_DIR}/amazon_books_cl_D${period}_eval.json"
+    local eval_bs
+    eval_bs=$(eval_batch_size)
+
+    log "Eval D${period}->D$((period + 1)) batch_size=$eval_bs"
+    log "Eval log: $eval_log"
+    mark_stage "$period" eval running \
+        --checkpoint-path "$output_dir" \
+        --log-path "$eval_log" \
+        --result-recall-path "$recall_file" \
+        --result-results-path "$results_file"
+
+    local eval_args=(
+        --model "$output_dir"
+        --eval_file "$eval_file"
+        --tid2item_id "$TID2ITEM"
+        --id2meta "$ID2META"
+        --num_gpus "$NUM_GPUS"
+        --batch_size "$eval_bs"
+        --max_users "$MAX_USERS"
+        --output_dir "$RESULT_DIR"
+        --period "$period"
+        --model_size "$MODEL_SIZE"
+        --cap "$CAP"
+        --gpu_ids "$GPU_IDS"
+    )
+    if [ "$CAP" != "full" ]; then
+        eval_args+=(--max_hist "$CAP_NUM")
+    fi
+
+    {
+        echo "[$(date -Is)] eval D${period}->D$((period + 1)) ${MODEL_SIZE} ${CAP}"
+        echo "model=$output_dir"
+        echo "eval_file=$eval_file"
+        echo "recall_file=$recall_file"
+    } >> "$eval_log"
+
+    local exit_code=0
+    CUDA_VISIBLE_DEVICES="$GPU_IDS" python3 "$EVAL_SCRIPT" "${eval_args[@]}" >> "$eval_log" 2>&1 || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        mark_stage "$period" eval failed \
+            --exit-code "$exit_code" \
+            --checkpoint-path "$output_dir" \
+            --log-path "$eval_log" \
+            --result-recall-path "$recall_file" \
+            --result-results-path "$results_file"
+        fail "Eval D${period} failed with exit code $exit_code. See $eval_log"
+    fi
+
+    if ! json_valid "$recall_file"; then
+        mark_stage "$period" eval failed \
+            --exit-code 1 \
+            --checkpoint-path "$output_dir" \
+            --log-path "$eval_log" \
+            --result-recall-path "$recall_file" \
+            --result-results-path "$results_file"
+        fail "Eval D${period} finished but recall JSON is missing or invalid: $recall_file"
+    fi
+
+    mark_stage "$period" eval completed \
+        --exit-code 0 \
+        --checkpoint-path "$output_dir" \
+        --log-path "$eval_log" \
+        --result-recall-path "$recall_file" \
+        --result-results-path "$results_file"
+    log "Eval D${period} complete"
+}
+
+collect_results() {
+    local period=$1
+    local collect_log="${CHAIN_LOG_DIR}/collect_D${period}.log"
+
+    log "Collecting table after D${period} eval"
+    mark_stage "$period" collect running --log-path "$collect_log"
+
+    local exit_code=0
+    python3 "$COLLECT_SCRIPT" --results-root "$RESULTS_ROOT" >> "$collect_log" 2>&1 || exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        mark_stage "$period" collect failed --exit-code "$exit_code" --log-path "$collect_log"
+        fail "Collection after D${period} failed with exit code $exit_code. See $collect_log"
+    fi
+
+    mark_stage "$period" collect completed --exit-code 0 --log-path "$collect_log"
+    log "Collection after D${period} complete"
+}
 
 PREV_CKPT=""
 
 for PERIOD in 0 1 2 3; do
-    DATASET_NAME="grlm_indomain_books_cl_D${PERIOD}${DATASET_SUFFIX}"
-    OUTPUT_DIR=${WORK_DIR}/checkpoints/grlm_books_cl_${MODEL_SIZE}_${CAP}_D${PERIOD}
+    OUTPUT_DIR="${CHECKPOINT_ROOT}/D${PERIOD}"
+    TRAIN_LOG="${CHAIN_LOG_DIR}/train_D${PERIOD}.log"
+    EVAL_LOG="${CHAIN_LOG_DIR}/eval_D${PERIOD}.log"
+    RECALL_FILE="${RESULT_DIR}/seq_recall_${HIST_TAG}_D${PERIOD}.json"
+    RESULTS_FILE="${RESULT_DIR}/seq_results_${HIST_TAG}_D${PERIOD}.jsonl"
 
-    # Determine model to start from and learning rate
-    if [ "$PERIOD" -eq 0 ]; then
-        INIT_MODEL=$MODEL_PATH
-        LR=$LR_INIT
-        EPOCHS=5
-    else
-        INIT_MODEL=$PREV_CKPT
-        LR=$LR_FT
-        EPOCHS=3
+    if json_valid "$RECALL_FILE"; then
+        log "D${PERIOD} eval already complete: $RECALL_FILE"
+        mark_stage "$PERIOD" eval completed \
+            --exit-code 0 \
+            --checkpoint-path "$OUTPUT_DIR" \
+            --log-path "$EVAL_LOG" \
+            --result-recall-path "$RECALL_FILE" \
+            --result-results-path "$RESULTS_FILE"
+        collect_results "$PERIOD"
+        PREV_CKPT="$OUTPUT_DIR"
+        continue
     fi
 
-    echo "[$(date)] === ${MODEL_SIZE} cap=${CAP} D${PERIOD} === (from: $INIT_MODEL)"
-
-    cd $LLAMA_DIR
-
-    if [ "$NUM_GPUS" -eq 1 ]; then
-        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
-        CUDA_VISIBLE_DEVICES=$GPU_IDS python3 src/train.py \
-            --stage sft \
-            --model_name_or_path $INIT_MODEL \
-            --do_train \
-            --dataset $DATASET_NAME \
-            --template qwen3 \
-            --finetuning_type full \
-            --output_dir $OUTPUT_DIR \
-            --overwrite_cache \
-            --overwrite_output_dir \
-            --save_strategy no \
-            --per_device_train_batch_size $BS \
-            --gradient_accumulation_steps $GA \
-            --lr_scheduler_type cosine \
-            --logging_steps 10 \
-            --learning_rate $LR \
-            --num_train_epochs $EPOCHS \
-            --plot_loss \
-            --bf16 \
-            --report_to none
+    TRAIN_STATUS=$(stage_status "$PERIOD" train)
+    if [ "$TRAIN_STATUS" = "completed" ] && checkpoint_ready "$OUTPUT_DIR"; then
+        log "D${PERIOD} train already complete; reusing checkpoint $OUTPUT_DIR"
     else
-        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
-        deepspeed --include localhost:$GPU_IDS --master_port $PORT \
-            src/train.py \
-            $USE_DS \
-            --stage sft \
-            --model_name_or_path $INIT_MODEL \
-            --do_train \
-            --dataset $DATASET_NAME \
-            --template qwen3 \
-            --finetuning_type full \
-            --output_dir $OUTPUT_DIR \
-            --overwrite_cache \
-            --overwrite_output_dir \
-            --save_strategy no \
-            --per_device_train_batch_size $BS \
-            --gradient_accumulation_steps $GA \
-            --lr_scheduler_type cosine \
-            --logging_steps 10 \
-            --learning_rate $LR \
-            --num_train_epochs $EPOCHS \
-            --plot_loss \
-            --bf16 \
-            --report_to none
-    fi
-    echo "[$(date)] Training D${PERIOD} DONE"
-
-    # Eval on next period (sequential, Tiger-style)
-    EVAL_FILE=${EVAL_DIR}/amazon_books_cl_D${PERIOD}_eval.json
-
-    # Eval batch size: larger for shorter history caps (less KV cache)
-    if [ "$CAP" == "full" ]; then
-        if [ "$MODEL_SIZE" == "06b" ]; then EVAL_BS=16
-        elif [ "$MODEL_SIZE" == "17b" ]; then EVAL_BS=8
-        else EVAL_BS=4; fi
-    else
-        CAP_NUM=${CAP#h}
-        if [ "$CAP_NUM" -le 10 ]; then
-            if [ "$MODEL_SIZE" == "06b" ]; then EVAL_BS=32
-            elif [ "$MODEL_SIZE" == "17b" ]; then EVAL_BS=16
-            else EVAL_BS=8; fi
+        if [ "$PERIOD" -eq 0 ]; then
+            INIT_MODEL="$MODEL_PATH"
+            LR="$LR_INIT"
+            EPOCHS=5
         else
-            if [ "$MODEL_SIZE" == "06b" ]; then EVAL_BS=20
-            elif [ "$MODEL_SIZE" == "17b" ]; then EVAL_BS=10
-            else EVAL_BS=6; fi
+            INIT_MODEL="$PREV_CKPT"
+            LR="$LR_FT"
+            EPOCHS=3
+            if ! checkpoint_ready "$INIT_MODEL"; then
+                fail "Cannot start D${PERIOD}; previous checkpoint is missing or incomplete: $INIT_MODEL"
+            fi
+        fi
+
+        if [ -d "$OUTPUT_DIR" ]; then
+            log "Removing incomplete D${PERIOD} checkpoint before retrain: $OUTPUT_DIR"
+            rm -rf "$OUTPUT_DIR"
+        fi
+        mkdir -p "$OUTPUT_DIR"
+        run_train "$PERIOD" "$INIT_MODEL" "$LR" "$EPOCHS" "$OUTPUT_DIR" "$TRAIN_LOG"
+    fi
+
+    run_eval "$PERIOD" "$OUTPUT_DIR" "$EVAL_LOG" "$RECALL_FILE" "$RESULTS_FILE"
+    collect_results "$PERIOD"
+
+    if [ "$PERIOD" -ge 2 ]; then
+        OLD_CKPT="${CHECKPOINT_ROOT}/D$((PERIOD - 2))"
+        if [ -d "$OLD_CKPT" ]; then
+            log "Deleting old checkpoint: $OLD_CKPT"
+            rm -rf "$OLD_CKPT"
         fi
     fi
 
-    echo "[$(date)] Sequential eval D${PERIOD}->D$((PERIOD+1)) (batch_size=$EVAL_BS)..."
-    if [ "$CAP" == "full" ]; then
-        CUDA_VISIBLE_DEVICES=$GPU_IDS python3 $EVAL_SCRIPT \
-            --model $OUTPUT_DIR --eval_file $EVAL_FILE --tid2item_id $TID2ITEM \
-            --id2meta $ID2META \
-            --num_gpus $NUM_GPUS --batch_size $EVAL_BS --max_users 5000 \
-            --output_dir $RESULT_DIR > $RESULT_DIR/eval_D${PERIOD}.log 2>&1
-    else
-        CUDA_VISIBLE_DEVICES=$GPU_IDS python3 $EVAL_SCRIPT \
-            --model $OUTPUT_DIR --eval_file $EVAL_FILE --tid2item_id $TID2ITEM \
-            --id2meta $ID2META \
-            --max_hist $CAP_NUM --num_gpus $NUM_GPUS --batch_size $EVAL_BS --max_users 5000 \
-            --output_dir $RESULT_DIR > $RESULT_DIR/eval_D${PERIOD}.log 2>&1
-    fi
-    echo "[$(date)] Eval DONE"
-
-    # Delete previous checkpoint (keep current for next period)
-    if [ -n "$PREV_CKPT" ] && [ -d "$PREV_CKPT" ]; then
-        echo "[$(date)] Deleting previous checkpoint: $PREV_CKPT"
-        rm -rf $PREV_CKPT
-    fi
-
-    PREV_CKPT=$OUTPUT_DIR
-    echo "[$(date)] === D${PERIOD} COMPLETE ==="
-    echo ""
+    PREV_CKPT="$OUTPUT_DIR"
+    log "=== D${PERIOD} complete ==="
 done
 
-# Keep final checkpoint (D3) for potential re-eval
-echo "[$(date)] Keeping final checkpoint: $PREV_CKPT"
-echo "[$(date)] ===== ${MODEL_SIZE} cap=${CAP} ALL PERIODS COMPLETE ====="
-echo "Results in: $RESULT_DIR"
+log "All periods complete; deleting chain checkpoints: $CHECKPOINT_ROOT"
+rm -rf "$CHECKPOINT_ROOT"
+python3 "$STATE_SCRIPT" finish --state-file "$STATE_FILE" --status completed
+log "===== ${MODEL_SIZE} cap=${CAP} all periods complete ====="
+log "Results in: $RESULT_DIR"

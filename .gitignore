@@ -5,6 +5,7 @@ checkpoints/
 
 # Training outputs
 results/
+runs/
 
 # LlamaFactory clone (downloaded by setup.sh)
 LlamaFactory/

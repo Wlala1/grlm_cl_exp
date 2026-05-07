@@ -17,6 +17,7 @@ from collections import defaultdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import time
+from datetime import datetime, timezone
 
 seed = 42
 random.seed(seed)
@@ -256,6 +257,11 @@ def main():
     parser.add_argument('--num_gpus', type=int, default=None)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--output_dir', type=str, default='./cl_results')
+    parser.add_argument('--period', type=int, default=None,
+                        help='Training period index. Used to write D-specific outputs.')
+    parser.add_argument('--model_size', type=str, default=None)
+    parser.add_argument('--cap', type=str, default=None)
+    parser.add_argument('--gpu_ids', type=str, default=None)
     args = parser.parse_args()
 
     print(f"Loading eval data: {args.eval_file}")
@@ -317,8 +323,16 @@ def main():
     }
 
     hist_tag = f"h{args.max_hist}" if args.max_hist else "hfull"
+    period_tag = f"_D{args.period}" if args.period is not None else ""
+    eval_transition = None
+    if args.period is not None:
+        eval_transition = f"D{args.period}->D{args.period + 1}"
+
     print(f"\n{'='*50}")
-    print(f"Sequential CL Eval ({hist_tag}, {all_total} pairs, {elapsed:.0f}s)")
+    if eval_transition:
+        print(f"Sequential CL Eval ({hist_tag}, {eval_transition}, {all_total} pairs, {elapsed:.0f}s)")
+    else:
+        print(f"Sequential CL Eval ({hist_tag}, {all_total} pairs, {elapsed:.0f}s)")
     print(f"{'='*50}")
     for k, v in recall.items():
         print(f"  {k}: {v:.4f}")
@@ -362,16 +376,22 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Save per-pair results
-    results_file = os.path.join(args.output_dir, f"seq_results_{hist_tag}.jsonl")
+    results_file = os.path.join(args.output_dir, f"seq_results_{hist_tag}{period_tag}.jsonl")
     with open(results_file, 'w') as f:
         for r in all_results:
             f.write(json.dumps(r) + '\n')
     print(f"Saved {len(all_results)} pair results to {results_file}")
 
-    recall_file = os.path.join(args.output_dir, f"seq_recall_{hist_tag}.json")
+    recall_file = os.path.join(args.output_dir, f"seq_recall_{hist_tag}{period_tag}.json")
     with open(recall_file, 'w') as f:
         json.dump({
             "eval_type": "sequential_per_target",
+            "model_size": args.model_size,
+            "cap": args.cap,
+            "train_period": args.period,
+            "eval_transition": eval_transition,
+            "gpu_ids": args.gpu_ids,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "metrics": recall,
             "n_pairs": all_total,
             "n_users": len(eval_data),

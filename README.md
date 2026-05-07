@@ -17,28 +17,33 @@ Sequential CL training + Tiger-style sequential evaluation for GRLM (Qwen3) on A
 git clone git@github.com:JazyJiang/grlm_cl_exp.git
 cd grlm_cl_exp
 
-# 2. Run setup (downloads models + data + installs LlamaFactory)
-#    Takes ~30min depending on network (downloads ~20GB of models + 1.1GB data)
+# 2. Build Docker image (installs LlamaFactory + downloads models/data into the image)
+#    Set HF_TOKEN first if HuggingFace access requires authentication.
 bash setup.sh
 
-# 3. (Optional) Verify data is correct
-ls data/books_id2meta.json data/books_tid2item_id.json
-ls data/cl_sft/amazon_books_cl_D0_train.json  # should exist
-
-# 4. Run experiments (see dispatch options below)
+# 3. Run experiments (see dispatch options below)
 bash dispatch_all.sh
 ```
 
 ## What `setup.sh` Does
 
+`setup.sh` builds the Docker image `grlm-cl-exp:books-qwen3`.
+
+Inside the image it:
 1. Clones [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) and installs it
-2. Downloads Qwen3-0.6B, Qwen3-1.7B, Qwen3-4B from HuggingFace → `models/`
-3. Downloads experiment data from `JazySong/grlm-books-cl-data` → `data/`
-4. Extracts `cl_sft.tar.gz` into `data/cl_sft/` (train + eval JSONs for all periods)
+2. Downloads Qwen3-0.6B, Qwen3-1.7B, Qwen3-4B from HuggingFace → `/opt/grlm_cl_exp/models/`
+3. Downloads experiment data from `JazySong/grlm-books-cl-data` → `/opt/grlm_cl_exp/data/`
+4. Extracts `cl_sft.tar.gz` into `/opt/grlm_cl_exp/data/cl_sft/`
 5. Creates D0 symlinks (D0 train is identical across all history caps)
 6. Generates `dataset_info.json` for LlamaFactory
 
-If any step was already completed (directory exists), it skips automatically. Safe to re-run.
+Useful build overrides:
+
+```bash
+HF_TOKEN=... bash setup.sh
+IMAGE_TAG=my-grlm:books BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel bash setup.sh
+LLAMAFACTORY_REF=<commit-or-tag> bash setup.sh
+```
 
 ## Experiment Design
 
@@ -54,19 +59,30 @@ If any step was already completed (directory exists), it skips automatically. Sa
 
 ## Running Experiments
 
-### Option A: Run all chains in parallel (recommended if you have 7 GPUs)
+### Option A: Run all chains on an 8×H200 node
 
 ```bash
 bash dispatch_all.sh
 ```
 
-This launches all 7 caps for 0.6B simultaneously on GPUs 1-7. After those finish (~4-6h), the script prints commands for the 1.7B and 4B batches — copy-paste them.
+This launches the full 3×7 grid with period-level resume. Runtime outputs are written under `${RUN_ROOT:-/runs}`:
+- logs: `/runs/logs/`
+- state: `/runs/state/`
+- checkpoints while running: `/runs/checkpoints/`
+- results and summary tables: `/runs/results/`
 
-**Full timeline on 7× H100:**
-- 0.6B (7 caps): ~4-6h (all parallel)
-- 1.7B (7 caps): ~6-10h (all parallel, after 0.6B)
-- 4B (7 caps): ~10-16h (3-4 at a time, 2 GPUs each)
-- **Total: ~24-32h**
+By default, `dispatch_all.sh` stages image assets into RAM before launching jobs:
+- source in image: `/opt/grlm_cl_exp/{models,data}`
+- RAM copy: `/dev/shm/grlm_cl_exp_assets/{models,data}`
+- disable with `USE_RAM_ASSETS=0 bash dispatch_all.sh`
+- change RAM path with `RAM_ASSET_ROOT=/dev/shm/my_grlm_assets bash dispatch_all.sh`
+- force recopy after rebuilding the image with `REFRESH_RAM_ASSETS=1 bash dispatch_all.sh`
+
+Re-running the same command skips completed period evals and resumes from the first incomplete period:
+
+```bash
+bash dispatch_all.sh
+```
 
 ### Option B: Sequential per GPU (simpler, fewer GPUs OK)
 
@@ -100,10 +116,17 @@ Each chain trains D0→D1→D2→D3 sequentially, with eval after each period. P
 
 ```bash
 # Watch a specific chain's log
-tail -f logs/06b_h10.log
+tail -f /runs/logs/06b_h10.log
+
+# Watch a period-specific train/eval log
+tail -f /runs/logs/06b_h10/train_D0.log
+tail -f /runs/logs/06b_h10/eval_D0.log
 
 # Check which chains are done (results appear when eval finishes)
-ls results/cl_results_seq/*/seq_recall_*.json
+ls /runs/results/cl_results_seq/*/seq_recall_*.json
+
+# Current Cross-Scale table
+ls /runs/results/cross_scale_history_noise_analysis.*
 
 # GPU utilization
 nvidia-smi
@@ -157,6 +180,13 @@ grlm_cl_exp/
 Each eval produces (per period):
 - `seq_recall_{tag}_D{t}.json`: Recall@1/5/10/20, overall + per-group breakdown
 - `seq_results_{tag}_D{t}.jsonl`: Per-(user, target) hit details for further analysis
+
+After every eval, the collector refreshes:
+- `/runs/results/cross_scale_history_noise_analysis.csv`
+- `/runs/results/cross_scale_history_noise_analysis.json`
+- `/runs/results/cross_scale_history_noise_analysis.md`
+
+Each chain also records period-level resume state in `/runs/state/{model}_{cap}.json`.
 
 Example `seq_recall_h10_D0.json`:
 ```json
