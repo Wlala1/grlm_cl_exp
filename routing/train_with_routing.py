@@ -27,6 +27,9 @@ from transformers import HfArgumentParser
 # Add LlamaFactory to path
 WORK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLAMA_DIR = os.path.join(WORK_DIR, "LlamaFactory")
+SCRIPTS_DIR = os.path.join(WORK_DIR, "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 if os.path.isdir(os.path.join(LLAMA_DIR, "src")):
     sys.path.insert(0, os.path.join(LLAMA_DIR, "src"))
 
@@ -44,6 +47,7 @@ from transformers import AutoConfig
 
 from routing.config_patch import patch_qwen3_config_for_routing
 from routing.aux_head import enable_aux_head
+from shutdown_checkpoint import SaveOnSignalCallback, exit_if_shutdown_requested, install_signal_handlers
 
 
 @dataclass
@@ -65,6 +69,8 @@ class RoutingArguments:
 
 
 def main():
+    install_signal_handlers()
+
     parser = HfArgumentParser((
         ModelArguments,
         DataArguments,
@@ -144,7 +150,15 @@ def main():
     _workflow.load_model = _load_model_with_aux
 
     # Step 4: Run standard LlamaFactory SFT
-    run_sft(model_args, data_args, training_args, finetuning_args, generating_args)
+    run_sft(
+        model_args,
+        data_args,
+        training_args,
+        finetuning_args,
+        generating_args,
+        callbacks=[SaveOnSignalCallback()],
+    )
+    exit_if_shutdown_requested()
 
 
 if __name__ == "__main__":

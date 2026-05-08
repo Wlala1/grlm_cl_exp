@@ -77,7 +77,7 @@ bash dispatch_all.sh
 This launches the full 3×7 grid with period-level resume. Runtime outputs are written under `${RUN_ROOT:-/runs}`:
 - logs: `/runs/logs/`
 - state: `/runs/state/`
-- checkpoints while running: `/runs/checkpoints/`
+- epoch and period checkpoints: `/runs/checkpoints/`
 - results and summary tables: `/runs/results/`
 
 By default, `dispatch_all.sh` stages image assets into RAM before launching jobs:
@@ -125,7 +125,7 @@ Parameters:
 - `cap`: `h2`, `h5`, `h10`, `h20`, `h30`, `h40`, or `full`
 - `gpu_ids`: e.g., `1` (single GPU) or `4,5` (multi-GPU, required for 4B)
 
-Each chain trains D0→D1→D2→D3 sequentially, with eval after each period. Previous checkpoints are auto-deleted to save disk.
+Each chain trains D0→D1→D2→D3 sequentially, with eval after each period. Checkpoints are retained by default for restartability; set `KEEP_CHECKPOINTS=0` to restore the older auto-cleanup behavior.
 
 ### Monitoring Progress
 
@@ -149,13 +149,15 @@ nvidia-smi
 
 ## Hyperparameters
 
-| Model | D0 lr | D1+ lr | D0 epochs | D1+ epochs | GPUs | Batch (BS×GA) |
-|-------|-------|--------|-----------|------------|------|---------------|
-| 0.6B  | 7e-5  | 3e-5   | 5         | 3          | 1    | 4×16 = 64     |
-| 1.7B  | 5e-5  | 2e-5   | 5         | 3          | 1    | 4×16 = 64     |
-| 4B    | 1e-4  | 5e-5   | 5         | 3          | 2    | 4×8 = 32      |
+| Model | D0 lr | D1+ lr | D0 epochs | D1+ epochs | GPUs | Effective train batch |
+|-------|-------|--------|-----------|------------|------|-----------------------|
+| 0.6B  | 7e-5  | 3e-5   | 5         | 3          | 1    | 32×2×1 = 64          |
+| 1.7B  | 5e-5  | 2e-5   | 5         | 3          | 1    | 32×2×1 = 64          |
+| 4B    | 1e-4  | 5e-5   | 5         | 3          | 2    | 32×1×2 = 64          |
 
 D0 trains from the pretrained model (more epochs + higher lr). D1+ fine-tunes from the previous period's checkpoint (lower lr to reduce forgetting).
+
+Training saves full Trainer checkpoints every epoch by default (`SAVE_STRATEGY=epoch`, `SAVE_TOTAL_LIMIT=2`), so optimizer/scheduler state can resume from the latest `checkpoint-*`. Set `SAVE_TOTAL_LIMIT=0` to disable pruning.
 
 ## Directory Structure
 
@@ -217,6 +219,6 @@ Example `seq_recall_h10_D0.json`:
 
 - **`huggingface-cli: command not found`**: Run `pip install huggingface_hub`
 - **CUDA OOM during eval**: Reduce eval batch size by editing `run_books_cl_v2.sh` (EVAL_BS variables around line 138)
-- **Disk full during training**: Each checkpoint is 2-7GB depending on model size. The script auto-deletes the previous period's checkpoint after eval completes. Ensure ~100GB free.
+- **Disk full during training**: Each checkpoint is 2-7GB depending on model size. Checkpoints are retained by default; use `SAVE_TOTAL_LIMIT=N` to keep only the latest N epoch checkpoints, or `KEEP_CHECKPOINTS=0` to delete old period checkpoints after they are no longer needed.
 - **Want to re-run eval only (without retraining)**: Use `recompute_cl_recall.py` on existing `seq_results_*.jsonl` files
 - **Network issues downloading from HuggingFace**: Set `HF_ENDPOINT` or use a proxy: `export https_proxy=http://your-proxy:port`

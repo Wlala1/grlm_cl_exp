@@ -19,6 +19,25 @@ log() {
     echo "[$(date -Is)] $*"
 }
 
+PIDS=()
+
+shutdown_dispatch() {
+    local sig=$1
+    local code=$2
+    local pid
+    log "Received $sig; forwarding to running workers"
+    for pid in "${PIDS[@]:-}"; do
+        kill -s "$sig" "$pid" 2>/dev/null || true
+    done
+    for pid in "${PIDS[@]:-}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    exit "$code"
+}
+
+trap 'shutdown_dispatch TERM 143' TERM
+trap 'shutdown_dispatch INT 130' INT
+
 run_chain() {
     local model=$1
     local cap=$2
@@ -48,8 +67,26 @@ run_chain() {
     fi
 
     log "START ${model} ${cap} GPUs=${gpu_ids} log=${chain_log}"
-    RUN_ROOT="$RUN_ROOT" bash "$RUNNER" "$model" "$cap" "$gpu_ids" >/dev/null 2>&1
+    local chain_pid=""
+    forward_chain_stop() {
+        local sig=$1
+        if [ -n "$chain_pid" ] && kill -0 "$chain_pid" 2>/dev/null; then
+            log "Received $sig; forwarding to ${model} ${cap} runner $chain_pid"
+            kill -s "$sig" "$chain_pid" 2>/dev/null || true
+        fi
+    }
+
+    trap 'forward_chain_stop TERM' TERM
+    trap 'forward_chain_stop INT' INT
+
+    RUN_ROOT="$RUN_ROOT" bash "$RUNNER" "$model" "$cap" "$gpu_ids" >/dev/null 2>&1 &
+    chain_pid=$!
+    set +e
+    wait "$chain_pid"
     local exit_code=$?
+    set -e
+    trap - TERM INT
+
     if [ "$exit_code" -eq 0 ]; then
         log "DONE  ${model} ${cap} GPUs=${gpu_ids}"
     else
@@ -173,7 +210,7 @@ fi
 python3 "${WORK_DIR}/scripts/collect_cross_scale_table.py" --results-root "${RUN_ROOT}/results" || TOTAL_FAILED=1
 
 if [ "$TOTAL_FAILED" -ne 0 ]; then
-    log "=== Dispatch complete with failures. Re-run bash dispatch_all.sh to resume failed/incomplete periods. ==="
+    log "=== Dispatch complete with failures. Re-run bash scripts/dispatch_h200_grid.sh to resume failed/incomplete periods. ==="
     exit 1
 fi
 

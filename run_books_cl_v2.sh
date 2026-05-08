@@ -88,6 +88,34 @@ checkpoint_ready() {
         && { compgen -G "${path}/*.safetensors" >/dev/null || compgen -G "${path}/pytorch_model*.bin" >/dev/null; }
 }
 
+latest_trainer_checkpoint() {
+    local path=$1
+    [ -d "$path" ] || return 0
+    python3 - "$path" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+best = None
+for name in os.listdir(root):
+    match = re.fullmatch(r"checkpoint-(\d+)", name)
+    if match is None:
+        continue
+    path = os.path.join(root, name)
+    if not os.path.isdir(path):
+        continue
+    if not os.path.isfile(os.path.join(path, "trainer_state.json")):
+        continue
+    candidate = (int(match.group(1)), path)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
+
+if best is not None:
+    print(best[1])
+PY
+}
+
 stage_status() {
     local period=$1
     local stage=$2
@@ -112,25 +140,33 @@ if [ "$MODEL_SIZE" == "06b" ]; then
     LR_INIT=7e-5
     LR_FT=3e-5
     NUM_GPUS=1
-    BS=4
-    GA=16
+    BS=32
+    GA=2
 elif [ "$MODEL_SIZE" == "17b" ]; then
     MODEL_PATH=${MODEL_DIR}/Qwen3-1.7B
     LR_INIT=5e-5
     LR_FT=2e-5
     NUM_GPUS=1
-    BS=4
-    GA=16
+    BS=32
+    GA=2
 elif [ "$MODEL_SIZE" == "4b" ]; then
     MODEL_PATH=${MODEL_DIR}/Qwen3-4B
     LR_INIT=1e-4
     LR_FT=5e-5
     NUM_GPUS=2
-    BS=4
-    GA=8
+    BS=32
+    GA=1
 else
     fail "Unknown model size: $MODEL_SIZE (use 06b, 17b, or 4b)"
 fi
+
+BS_VAR="BS_${MODEL_SIZE}"
+GA_VAR="GA_${MODEL_SIZE}"
+BS=${!BS_VAR:-${BS}}
+GA=${!GA_VAR:-${GA}}
+BS=${BS_OVERRIDE:-${BS}}
+GA=${GA_OVERRIDE:-${GA}}
+EFFECTIVE_TRAIN_BATCH=$((BS * GA * NUM_GPUS))
 
 case "$CAP" in
     h2|h5|h10|h20|h30|h40|full) ;;
@@ -165,6 +201,7 @@ log "State: $STATE_FILE"
 log "Chain log: $CHAIN_LOG"
 log "Model dir: $MODEL_DIR"
 log "Data dir: $DATA_DIR"
+log "Train batch: per_device_train_batch_size=$BS gradient_accumulation_steps=$GA effective_train_batch_size=$EFFECTIVE_TRAIN_BATCH"
 
 if [ -d "$LLAMA_DIR/data" ] && [ -d "$DATA_DIR/cl_sft" ]; then
     ln -sfn "$DATA_DIR/cl_sft" "$LLAMA_DIR/data/grlm_in_domain"
@@ -177,6 +214,23 @@ if [ "${SMOKE:-0}" = "1" ]; then
 else
     SMOKE_TRAIN_ARGS=()
 fi
+
+SAVE_STRATEGY=${SAVE_STRATEGY:-epoch}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-2}
+SAVE_ARGS=(--save_strategy "$SAVE_STRATEGY" --save_only_model false)
+if [ -n "${SAVE_STEPS:-}" ]; then
+    SAVE_ARGS+=(--save_steps "$SAVE_STEPS")
+fi
+if [ "$SAVE_TOTAL_LIMIT" != "0" ]; then
+    SAVE_ARGS+=(--save_total_limit "$SAVE_TOTAL_LIMIT")
+fi
+if [ "$SAVE_TOTAL_LIMIT" = "0" ]; then
+    SAVE_TOTAL_LIMIT_LABEL="unlimited"
+else
+    SAVE_TOTAL_LIMIT_LABEL="$SAVE_TOTAL_LIMIT"
+fi
+KEEP_CHECKPOINTS=${KEEP_CHECKPOINTS:-1}
+log "Checkpointing: save_strategy=$SAVE_STRATEGY save_total_limit=$SAVE_TOTAL_LIMIT_LABEL save_only_model=false keep_checkpoints=$KEEP_CHECKPOINTS"
 
 eval_batch_size() {
     if [ "$CAP" == "full" ]; then
@@ -194,6 +248,41 @@ eval_batch_size() {
     fi
 }
 
+ACTIVE_TRAIN_PID=""
+STOP_REQUESTED=0
+
+forward_train_stop() {
+    local sig=$1
+    STOP_REQUESTED=1
+    if [ -n "$ACTIVE_TRAIN_PID" ] && kill -0 "$ACTIVE_TRAIN_PID" 2>/dev/null; then
+        log "Received $sig; forwarding to training process $ACTIVE_TRAIN_PID"
+        kill -s "$sig" "$ACTIVE_TRAIN_PID" 2>/dev/null || true
+    fi
+}
+
+wait_for_active_train() {
+    local pid=$1
+    local exit_code=0
+    ACTIVE_TRAIN_PID="$pid"
+    STOP_REQUESTED=0
+    trap 'forward_train_stop TERM' TERM
+    trap 'forward_train_stop INT' INT
+
+    set +e
+    wait "$pid"
+    exit_code=$?
+    if [ "$STOP_REQUESTED" -eq 1 ] && kill -0 "$pid" 2>/dev/null; then
+        log "Waiting for training process $pid to save its shutdown checkpoint"
+        wait "$pid"
+        exit_code=$?
+    fi
+    set -e
+
+    trap - TERM INT
+    ACTIVE_TRAIN_PID=""
+    return "$exit_code"
+}
+
 run_train() {
     local period=$1
     local init_model=$2
@@ -203,6 +292,9 @@ run_train() {
     local train_log=$6
     local dataset_name="grlm_indomain_books_cl_D${period}${DATASET_SUFFIX}"
     local port=$((29500 + RANDOM % 1000))
+    local resume_checkpoint
+    resume_checkpoint=$(latest_trainer_checkpoint "$output_dir")
+    local resume_args=()
 
     local common_args=(
         --stage sft
@@ -213,8 +305,6 @@ run_train() {
         --finetuning_type full
         --output_dir "$output_dir"
         --overwrite_cache
-        --overwrite_output_dir
-        --save_strategy no
         --per_device_train_batch_size "$BS"
         --gradient_accumulation_steps "$GA"
         --lr_scheduler_type cosine
@@ -225,9 +315,17 @@ run_train() {
         --bf16
         --report_to none
     )
+    common_args+=("${SAVE_ARGS[@]}")
+    if [ -n "$resume_checkpoint" ]; then
+        resume_args=(--resume_from_checkpoint "$resume_checkpoint")
+        common_args+=("${resume_args[@]}")
+    fi
     common_args+=("${SMOKE_TRAIN_ARGS[@]}")
 
     log "Training D${period} from $init_model"
+    if [ -n "$resume_checkpoint" ]; then
+        log "Resuming D${period} from trainer checkpoint: $resume_checkpoint"
+    fi
     log "Train log: $train_log"
     mark_stage "$period" train running --checkpoint-path "$output_dir" --log-path "$train_log"
 
@@ -237,18 +335,22 @@ run_train() {
         echo "dataset=$dataset_name"
         echo "init_model=$init_model"
         echo "output_dir=$output_dir"
+        echo "resume_checkpoint=${resume_checkpoint:-}"
     } >> "$train_log"
 
     local exit_code=0
     if [ "$NUM_GPUS" -eq 1 ]; then
         GRLM_GPU_IDS="$GPU_IDS" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
-            python3 "$WORK_DIR/scripts/named_train.py" src/train.py "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+            python3 "$WORK_DIR/scripts/named_train.py" "$WORK_DIR/scripts/llamafactory_train_with_signal.py" \
+            "${common_args[@]}" >> "$train_log" 2>&1 &
     else
         GRLM_GPU_IDS="$GPU_IDS" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
             deepspeed --include "localhost:${GPU_IDS}" --master_port "$port" \
-            "$WORK_DIR/scripts/named_train.py" src/train.py --deepspeed examples/deepspeed/ds_z2_config.json \
-            "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+            "$WORK_DIR/scripts/named_train.py" "$WORK_DIR/scripts/llamafactory_train_with_signal.py" \
+            --deepspeed examples/deepspeed/ds_z2_config.json \
+            "${common_args[@]}" >> "$train_log" 2>&1 &
     fi
+    wait_for_active_train "$!" || exit_code=$?
 
     if [ "$exit_code" -ne 0 ]; then
         mark_stage "$period" train failed --exit-code "$exit_code" --checkpoint-path "$output_dir" --log-path "$train_log"
@@ -406,9 +508,12 @@ for PERIOD in 0 1 2 3; do
             fi
         fi
 
-        if [ -d "$OUTPUT_DIR" ]; then
+        RESUME_CKPT=$(latest_trainer_checkpoint "$OUTPUT_DIR")
+        if [ -d "$OUTPUT_DIR" ] && [ -z "$RESUME_CKPT" ]; then
             log "Removing incomplete D${PERIOD} checkpoint before retrain: $OUTPUT_DIR"
             rm -rf "$OUTPUT_DIR"
+        elif [ -n "$RESUME_CKPT" ]; then
+            log "Found resumable D${PERIOD} trainer checkpoint: $RESUME_CKPT"
         fi
         mkdir -p "$OUTPUT_DIR"
         run_train "$PERIOD" "$INIT_MODEL" "$LR" "$EPOCHS" "$OUTPUT_DIR" "$TRAIN_LOG"
@@ -431,7 +536,7 @@ for PERIOD in 0 1 2 3; do
     run_eval "$PERIOD" "$OUTPUT_DIR" "$EVAL_LOG" "$RECALL_FILE" "$RESULTS_FILE"
     collect_results "$PERIOD"
 
-    if [ "$PERIOD" -ge 2 ]; then
+    if [ "$KEEP_CHECKPOINTS" != "1" ] && [ "$PERIOD" -ge 2 ]; then
         OLD_CKPT="${CHECKPOINT_ROOT}/D$((PERIOD - 2))"
         if [ -d "$OLD_CKPT" ]; then
             log "Deleting old checkpoint: $OLD_CKPT"
@@ -443,8 +548,12 @@ for PERIOD in 0 1 2 3; do
     log "=== D${PERIOD} complete ==="
 done
 
-log "All periods complete; deleting chain checkpoints: $CHECKPOINT_ROOT"
-rm -rf "$CHECKPOINT_ROOT"
+if [ "$KEEP_CHECKPOINTS" = "1" ]; then
+    log "All periods complete; retaining chain checkpoints: $CHECKPOINT_ROOT"
+else
+    log "All periods complete; deleting chain checkpoints: $CHECKPOINT_ROOT"
+    rm -rf "$CHECKPOINT_ROOT"
+fi
 python3 "$STATE_SCRIPT" finish --state-file "$STATE_FILE" --status completed
 log "===== ${MODEL_SIZE} cap=${CAP} all periods complete ====="
 log "Results in: $RESULT_DIR"
