@@ -248,8 +248,8 @@ run_train() {
     } >> "$train_log"
 
     local exit_code=0
-    PYTHONPATH="${WORK_DIR}:${PYTHONPATH:-}" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
-        python3 -m routing.train_with_routing "${train_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+    GRLM_GPU_IDS="$GPU_IDS" PYTHONPATH="${WORK_DIR}:${PYTHONPATH:-}" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+        python3 "$WORK_DIR/scripts/named_train.py" -m routing.train_with_routing "${train_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
 
     if [ "$exit_code" -ne 0 ]; then
         mark_stage "$period" train failed --exit-code "$exit_code" --checkpoint-path "$output_dir" --log-path "$train_log"

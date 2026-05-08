@@ -64,7 +64,7 @@ else
 fi
 cd "$LLAMA_DIR"
 python3 -m pip install -e ".[torch,metrics]"
-python3 -m pip install --upgrade deepspeed
+python3 -m pip install --upgrade deepspeed setproctitle
 cd "$WORK_DIR"
 
 log "[Step 2] Downloading Qwen3 models"

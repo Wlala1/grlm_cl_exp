@@ -241,12 +241,12 @@ run_train() {
 
     local exit_code=0
     if [ "$NUM_GPUS" -eq 1 ]; then
-        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
-            python3 src/train.py "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
+        GRLM_GPU_IDS="$GPU_IDS" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+            python3 "$WORK_DIR/scripts/named_train.py" src/train.py "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
     else
-        WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
+        GRLM_GPU_IDS="$GPU_IDS" WANDB_DISABLED=true DISABLE_VERSION_CHECK=1 \
             deepspeed --include "localhost:${GPU_IDS}" --master_port "$port" \
-            src/train.py --deepspeed examples/deepspeed/ds_z2_config.json \
+            "$WORK_DIR/scripts/named_train.py" src/train.py --deepspeed examples/deepspeed/ds_z2_config.json \
             "${common_args[@]}" >> "$train_log" 2>&1 || exit_code=$?
     fi
 
