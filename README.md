@@ -151,9 +151,9 @@ nvidia-smi
 
 | Model | D0 lr | D1+ lr | D0 epochs | D1+ epochs | GPUs | Effective train batch |
 |-------|-------|--------|-----------|------------|------|-----------------------|
-| 0.6B  | 7e-5  | 3e-5   | 5         | 3          | 1    | 16×4×1 = 64          |
-| 1.7B  | 5e-5  | 2e-5   | 5         | 3          | 1    | 16×4×1 = 64          |
-| 4B    | 1e-4  | 5e-5   | 5         | 3          | 2    | 16×2×2 = 64          |
+| 0.6B  | 7e-5  | 3e-5   | 5         | 3          | 1    | 4×16×1 = 64          |
+| 1.7B  | 5e-5  | 2e-5   | 5         | 3          | 1    | 4×16×1 = 64          |
+| 4B    | 1e-4  | 5e-5   | 5         | 3          | 2    | 4×8×2 = 64           |
 
 D0 trains from the pretrained model (more epochs + higher lr). D1+ fine-tunes from the previous period's checkpoint (lower lr to reduce forgetting).
 

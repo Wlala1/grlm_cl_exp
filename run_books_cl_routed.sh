@@ -146,22 +146,22 @@ if [ "$MODEL_SIZE" == "06b" ]; then
     LR_INIT=7e-5
     LR_FT=3e-5
     NUM_GPUS=1
-    BS=16
-    GA=4
+    BS=4
+    GA=16
 elif [ "$MODEL_SIZE" == "17b" ]; then
     MODEL_PATH=${MODEL_DIR}/Qwen3-1.7B
     LR_INIT=5e-5
     LR_FT=2e-5
     NUM_GPUS=1
-    BS=16
-    GA=4
+    BS=4
+    GA=16
 elif [ "$MODEL_SIZE" == "4b" ]; then
     MODEL_PATH=${MODEL_DIR}/Qwen3-4B
     LR_INIT=1e-4
     LR_FT=5e-5
     NUM_GPUS=2
-    BS=16
-    GA=2
+    BS=4
+    GA=8
 else
     fail "Unknown model size: $MODEL_SIZE (use 06b, 17b, or 4b)"
 fi
