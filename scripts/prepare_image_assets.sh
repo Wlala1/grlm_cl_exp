@@ -28,7 +28,19 @@ download_model() {
     fi
     log "Downloading ${repo_id} -> ${output_dir}"
     mkdir -p "$output_dir"
-    huggingface-cli download "$repo_id" --local-dir "$output_dir"
+    hf_download "$repo_id" "$output_dir"
+}
+
+hf_download() {
+    local repo_id=$1
+    local output_dir=$2
+    shift 2
+
+    if command -v hf >/dev/null 2>&1; then
+        hf download "$repo_id" --local-dir "$output_dir" "$@"
+    else
+        huggingface-cli download "$repo_id" --local-dir "$output_dir" "$@"
+    fi
 }
 
 log "=== Preparing GRLM CL image assets ==="
@@ -52,6 +64,7 @@ else
 fi
 cd "$LLAMA_DIR"
 python3 -m pip install -e ".[torch,metrics]"
+python3 -m pip install --upgrade deepspeed
 cd "$WORK_DIR"
 
 log "[Step 2] Downloading Qwen3 models"
@@ -63,7 +76,7 @@ download_model Qwen/Qwen3-4B "${MODEL_DIR}/Qwen3-4B"
 log "[Step 3] Preparing Books CL data"
 mkdir -p "${DATA_DIR}/cl_sft"
 if [ ! -f "${DATA_DIR}/books_id2meta.json" ]; then
-    huggingface-cli download JazySong/grlm-books-cl-data --local-dir "$DATA_DIR" --repo-type dataset
+    hf_download JazySong/grlm-books-cl-data "$DATA_DIR" --repo-type dataset
 fi
 
 if [ -f "${DATA_DIR}/cl_sft.tar.gz" ]; then

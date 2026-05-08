@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE_TAG=${IMAGE_TAG:-grlm-cl-exp:books-qwen3}
+IMAGE_TAG=${IMAGE_TAG:-sglang-mini}
 BASE_IMAGE=${BASE_IMAGE:-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel}
 LLAMAFACTORY_REPO=${LLAMAFACTORY_REPO:-https://github.com/hiyouga/LLaMA-Factory.git}
 LLAMAFACTORY_REF=${LLAMAFACTORY_REF:-}

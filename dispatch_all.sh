@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE_TAG=${IMAGE_TAG:-grlm-cl-exp:books-qwen3}
+IMAGE_TAG=${IMAGE_TAG:-sglang-mini}
 RUN_DIR=${RUN_DIR:-${WORK_DIR}/runs}
 RUN_ROOT=/runs
 USE_RAM_ASSETS=${USE_RAM_ASSETS:-1}

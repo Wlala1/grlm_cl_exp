@@ -40,8 +40,9 @@ def main():
         dataset_info[dataset_key] = {
             "file_name": os.path.join("grlm_in_domain", fname),
             "columns": {
-                "prompt": "prompt",
-                "response": "response"
+                "prompt": "instruction",
+                "query": "input",
+                "response": "output"
             }
         }
 

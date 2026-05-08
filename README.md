@@ -27,7 +27,7 @@ bash dispatch_all.sh
 
 ## What `setup.sh` Does
 
-`setup.sh` builds the Docker image `grlm-cl-exp:books-qwen3`.
+`setup.sh` builds the Docker image `sglang-mini`.
 
 Inside the image it:
 1. Clones [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) and installs it
@@ -43,6 +43,15 @@ Useful build overrides:
 HF_TOKEN=... bash setup.sh
 IMAGE_TAG=my-grlm:books BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel bash setup.sh
 LLAMAFACTORY_REF=<commit-or-tag> bash setup.sh
+```
+
+Run the image directly:
+
+```bash
+docker run --rm --gpus all --ipc=host \
+  --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v "$PWD/runs:/runs" \
+  sglang-mini
 ```
 
 ## Experiment Design
